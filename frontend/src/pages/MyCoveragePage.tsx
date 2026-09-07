@@ -118,7 +118,7 @@ export default function MyCoveragePage({ pools, setCurrentTab, setSelectedPoolId
                 if (!pool) return null;
                 const { data: consecutive_drought_days } = useFetchConsecutiveDroughtDays(pool.pool_id)
                 const daysRemaining = Math.max(0, pool.consecutive_days_required - Number(consecutive_drought_days));
-                const { data: weatherReading } = useFetchWeatherReading(pool.pool_id)
+                const { data: weatherReading } = useFetchWeatherReading(pool.pool_id, new Date().toISOString().split('T')[0])
 
                 return (
                   <div

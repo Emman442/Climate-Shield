@@ -12,7 +12,6 @@ interface LandingPageProps {
 
 export default function LandingPage({ pools, isLoadingPools, setCurrentTab, setSelectedPoolId }: LandingPageProps) {
   
-  // Show first 3 open or active pools
   const activePools = pools
     .filter(p => p.status === 'open' || p.status === 'active' || p.status === 'triggered')
     .slice(0, 3);
@@ -201,7 +200,7 @@ interface PoolCardProps {
 function PoolCard({ pool, onViewDetails }: PoolCardProps) {
   // Safe execution of custom hook inside separate component scope
   const { data: dynamicConsecutiveDays } = useFetchConsecutiveDroughtDays(pool.pool_id);
-  const {data: weatherReading} = useFetchWeatherReading(pool.pool_id)
+  const {data: weatherReading} = useFetchWeatherReading(pool.pool_id, new Date().toISOString().split('T')[0]);
   
   // Use custom contract hook value fallback to static object property if loading
   const visualStreakDays = dynamicConsecutiveDays  ?? 0;

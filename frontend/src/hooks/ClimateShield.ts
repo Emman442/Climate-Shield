@@ -53,7 +53,7 @@ export function useFetchConsecutiveDroughtDays(poolId: string) {
     });
 }
 
-export function useFetchWeatherReading(poolId: string) {
+export function useFetchWeatherReading(poolId: string, day: string) {
     const contract = useClimateShieldContract();
 
     return useQuery<WeatherReading, Error>({
@@ -62,7 +62,7 @@ export function useFetchWeatherReading(poolId: string) {
             if (!contract) {
                 throw new Error("Contract not initialized");
             }
-            return contract.getWeatherReading(poolId);
+            return contract.getWeatherReading(poolId, day);
         },
         enabled: !!contract,
     });
@@ -72,7 +72,7 @@ export function useFetchRecentReading(poolId: string, days: number) {
     const contract = useClimateShieldContract();
 
     return useQuery<WeatherReading[], Error>({
-        queryKey: ["weather_reading", poolId],
+        queryKey: ["get_recent_readings", poolId],
         queryFn: () => {
             if (!contract) {
                 throw new Error("Contract not initialized");
@@ -376,6 +376,37 @@ export function useExpirePool() {
         onError: async (error) => {
             console.error("Error expiring pool:", error);
             toast.error("Failed to expire pool.");
+        }
+    });
+}
+
+export function useCheckTrigger() {
+    const contract = useClimateShieldContract();
+    const queryClient = useQueryClient();
+
+    return useMutation({
+        mutationFn: async ({
+            poolId,
+        }: {
+            poolId: string
+        }) => {
+            if (!contract) {
+                throw new Error("Contract not initialized");
+            }
+
+            const receipt = await contract.CheckTrigger(poolId);
+            console.log("Check trigger tx receipt:", receipt);
+            return receipt;
+        },
+
+        onSuccess: async (_, variables) => {
+            await queryClient.invalidateQueries({
+                queryKey: ["policy", variables.poolId],
+            });
+        },
+        onError: async (error) => {
+            console.error("Error checking trigger:", error);
+            toast.error("Failed to check trigger.");
         }
     });
 }

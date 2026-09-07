@@ -3,7 +3,7 @@ import { Pool, WeatherReading, PayoutRecord } from '../lib/contract/types';
 import { MapPin, Calendar, Database, ArrowLeft, ShieldAlert, CheckCircle, UserCheck, Play, Send, RefreshCw } from 'lucide-react';
 import { useWallet } from '../lib/genlayer/wallet';
 import { useApp } from '../context/AppContext';
-import { useBuyPolicy, useFetchConsecutiveDroughtDays, useFetchPool, useFetchPoolPayouts, useFetchPoolPolicies, useFetchRecentReading, useCancelPolicy, useRecordDailyReading, useExpirePool } from '../hooks/ClimateShield';
+import { useBuyPolicy, useFetchConsecutiveDroughtDays, useFetchPool, useFetchPoolPayouts, useFetchPoolPolicies, useCancelPolicy, useRecordDailyReading, useExpirePool, useCheckTrigger, useFetchRecentReading } from '../hooks/ClimateShield';
 
 interface PoolDetailPageProps {
   poolId: string;
@@ -15,10 +15,8 @@ interface PoolDetailPageProps {
 export default function PoolDetailPage({ poolId, onBack, poolData, isLoading }: PoolDetailPageProps) {
   const { address } = useWallet();
   const { showToast } = useApp()
-  // Custom hooks for fetching live contract state
-  const { data: pool, refetch: refreshPool } = useFetchPool(poolId);
 
-  console.log("PoolDetailPage: poolData", poolData);
+  const { data: pool, refetch: refreshPool } = useFetchPool(poolId);
   const { data: policies, refetch: refreshPolicies } = useFetchPoolPolicies(poolId);
   const { data: consecutive_drought_days } = useFetchConsecutiveDroughtDays(poolId)
   const activePool = pool || poolData;
@@ -49,7 +47,19 @@ export default function PoolDetailPage({ poolId, onBack, poolData, isLoading }: 
   const { isPending: isBuyingPolicy, mutate: buyPolicy } = useBuyPolicy()
   const { isPending: isCancellingPolicy, mutate: cancelPolicy } = useCancelPolicy()
   const { isPending: isRecordingDailyReading, mutate: recordDailyReading } = useRecordDailyReading()
-  const {isPending: isExpiringPool, mutate: expirePool} = useExpirePool()
+  const { isPending: isExpiringPool, mutate: expirePool } = useExpirePool()
+  const { isPending: isCheckingTrigger, mutate: checkTrigger } = useCheckTrigger()
+
+  const handleCheckTrigger = async () => {
+    checkTrigger({ poolId }, {
+      onSuccess: async () => {
+        showToast('Trigger check executed successfully!', 'success');
+      },
+      onError: async () => {
+        showToast('Failed to check trigger.', 'error');
+      }
+    })
+  }
 
 
   const { data: readings } = useFetchRecentReading(poolId, 10)
@@ -77,16 +87,14 @@ export default function PoolDetailPage({ poolId, onBack, poolData, isLoading }: 
   const claimedUserPolicy = address
     ? activePolicies.find(p => p.farmer.toLowerCase() === address.toLowerCase() && p.claimed)
     : null;
+      console.log(readings)
 
   const todayStr = new Date().toISOString().split('T')[0];
   const isTodayRecorded = readings?.some(r => r.day === todayStr);
 
 
-  console.log(readings)
-
   const coveragePerPolicy = Number(activePool.coverage_per_policy || 0);
   const premiumPerPolicy = Number(activePool.premium_per_policy || 0);
-  console.log("PoolDetailPage: coveragePerPolicy", coveragePerPolicy, "premiumPerPolicy", typeof premiumPerPolicy);
   const consecutiveDaysRequired = Number(activePool.consecutive_days_required || 0);
   const consecutiveDroughtDays = Number(consecutive_drought_days || 0);
   const droughtThreshold = Number(activePool.drought_threshold || 0);
@@ -127,7 +135,7 @@ export default function PoolDetailPage({ poolId, onBack, poolData, isLoading }: 
         showToast('Failed to expire pool.', 'error');
       }
     });
-  };
+  }
 
   const handleCancelPolicy = async () => {
     if (!address || !activeUserPolicy) return;
@@ -154,16 +162,6 @@ export default function PoolDetailPage({ poolId, onBack, poolData, isLoading }: 
     });
   };
 
-  // // Trigger payout distribution
-  // const handleTriggerPayout = async () => {
-  //   setIsTriggering(true);
-  //   try {
-  //     // Trigger evaluation engine
-  //     await handleRefreshData();
-  //   } finally {
-  //     setIsTriggering(false);
-  //   }
-  // };
 
   // Drought index color utilities
   const getIndexPillColor = (index: string) => {
@@ -615,6 +613,74 @@ export default function PoolDetailPage({ poolId, onBack, poolData, isLoading }: 
                   </p>
                 </div>
 
+
+
+                {activePool.status === "active" && (
+                  <div className="bg-[#0f0f0f] border border-[#1e1e1e] p-4 mt-4">
+                    <p className="text-[#16a34a] text-xs uppercase tracking-widest font-bold mb-3">
+                      Drought Trigger Status
+                    </p>
+
+                    {/* Consecutive days progress */}
+                    <div className="mb-4">
+                      <div className="flex justify-between mb-1">
+                        <span className="text-gray-400 text-xs">Consecutive Drought Days</span>
+                        <span className="text-white text-xs font-mono">
+                          {consecutiveDroughtDays} / {activePool.consecutive_days_required}
+                        </span>
+                      </div>
+                      <div className="w-full bg-[#1e1e1e] h-1.5">
+                        <div
+                          className={`h-1.5 transition-all ${consecutiveDroughtDays >= Number(activePool.consecutive_days_required)
+                            ? "bg-red-500"
+                            : "bg-[#16a34a]"
+                            }`}
+                          style={{
+                            width: `${Math.min(
+                              (consecutiveDroughtDays / Number(activePool.consecutive_days_required)) * 100,
+                              100
+                            )}%`
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    {consecutiveDroughtDays >= Number(activePool.consecutive_days_required) ? (
+                      <div>
+                        <p className="text-amber-400 text-xs mb-3">
+                          Trigger conditions met. Anyone can initiate emergency payout distribution.
+                        </p>
+                        <button
+                          onClick={handleCheckTrigger}
+                          disabled={isCheckingTrigger}
+                          className="w-full bg-red-600 text-white text-sm font-bold py-2 px-4 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {isCheckingTrigger ? "Checking..." : "Check Trigger & Distribute Payouts"}
+                        </button>
+                        <p className="text-gray-500 text-xs mt-2">
+                          This distributes funds to all {activePool.total_policies} covered farmers automatically.
+                        </p>
+                      </div>
+                    ) : (
+                      <p className="text-gray-500 text-xs">
+                        {Number(activePool.consecutive_days_required) - consecutiveDroughtDays} more consecutive
+                        drought days needed to trigger payout.
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {activePool.status === "triggered" && (
+                  <div className="bg-[#0a1a00] border border-[#16a34a] p-4 mt-4">
+                    <p className="text-[#16a34a] text-xs uppercase tracking-widest font-bold mb-1">
+                      Emergency Payouts Distributed
+                    </p>
+                    <p className="text-gray-400 text-xs">
+                      Drought trigger activated. Funds have been sent to all covered farmers.
+                    </p>
+                  </div>
+                )}
+
                 <div className="border-t border-[#1e1e1e]/60 my-2 pt-2 text-xs">
                   <span className="text-[#6b7280]">Reporting Date: </span>
                   <span className="font-mono text-white font-bold">{todayStr}</span>
@@ -676,20 +742,20 @@ export default function PoolDetailPage({ poolId, onBack, poolData, isLoading }: 
                 onClick={handleExpirePool}
                 disabled={!hasReached21Days}
                 className={`w-full px-4 py-3 rounded-lg font-semibold transition-all ${hasReached21Days
-                    ? 'bg-red-600 hover:bg-red-700 text-white cursor-pointer'
-                    : 'bg-gray-200 text-gray-500 cursor-not-allowed'
+                  ? 'bg-red-600 hover:bg-red-700 text-white cursor-pointer'
+                  : 'bg-gray-200 text-gray-500 cursor-not-allowed'
                   }`}
               >
                 {hasReached21Days
                   ? 'Trigger Expiration'
-                  : `Unavailable until the end of the 21-day monitoring period)`}
+                  : `Unavailable at the moment`}
               </button>
 
             </div>
-            </div>
-
           </div>
+
         </div>
       </div>
-      );
+    </div>
+  );
 }

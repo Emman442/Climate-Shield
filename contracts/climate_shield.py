@@ -57,11 +57,11 @@ class Pool:
     name: str
     description: str
     region_name: str
-    latitude: str           # stored as string e.g. "9.0572"
-    longitude: str          # stored as string e.g. "7.4898"
-    radius_km: str          # coverage radius in km
-    drought_threshold: str  # soil moisture below this triggers payout e.g. "0.15"
-    consecutive_days_required: i32  # days below threshold to trigger
+    latitude: str           
+    longitude: str   
+    radius_km: str   
+    drought_threshold: str 
+    consecutive_days_required: i32 
     premium_per_policy: i32
     coverage_per_policy: i32
     max_policies: i32
@@ -72,7 +72,7 @@ class Pool:
     created_by: str
     trigger_activated_at: str
     policy_ids: DynArray[str]
-    reading_days: DynArray[str]  # ordered list of recorded day strings
+    reading_days: DynArray[str]
     season_end: i64
 
 
@@ -94,8 +94,7 @@ class ClimateShield(gl.Contract):
     payouts: TreeMap[str, PayoutRecord]
     payout_counter: i32
 
-    # Track if a farmer already has a policy in a pool
-    # keyed by pool_id + "|" + wallet
+    
     farmer_pool_policy: TreeMap[str, str]
 
     # Admin
@@ -129,7 +128,6 @@ class ClimateShield(gl.Contract):
         else:
             return "severe"
 
-    # ─── Pool Creation (Admin) ────────────────────────────────
 
     @gl.public.write
     def create_pool(
@@ -196,7 +194,6 @@ class ClimateShield(gl.Contract):
         assert self.pools[pool_id].status == "open", "Pool not open"
         self.pools[pool_id].status = "closed"
 
-    # ─── Buy Policy (no registration needed) ─────────────────
 
     @gl.public.write.payable
     def buy_policy(self, pool_id: str) -> str:
@@ -209,7 +206,7 @@ class ClimateShield(gl.Contract):
 
         assert pool_id in self.pools, "Pool not found"
         p = self.pools[pool_id]
-        assert p.status == "open", "Pool not accepting new policies"
+        assert p.status in ["open", "active"], "Pool not accepting new policies"
         assert int(p.total_policies) < int(p.max_policies), "Pool is full"
 
         farmer_key = self._farmer_pool_key(pool_id, farmer)
@@ -371,13 +368,6 @@ class ClimateShield(gl.Contract):
 
     @gl.public.write
     def check_trigger(self, pool_id: str) -> bool:
-        """
-        Check if the drought trigger condition has been met.
-        Looks at the last N consecutive days of readings.
-        If all N days show drought_index of 'severe' or 'warning',
-        the trigger fires and all farmers receive their coverage payout.
-        Anyone can call this — no permission required.
-        """
         assert pool_id in self.pools, "Pool not found"
         p = self.pools[pool_id]
         assert p.status == "active", "Pool not active"
@@ -387,8 +377,16 @@ class ClimateShield(gl.Contract):
 
         assert len(all_days) >= required_days, "Not enough readings yet"
 
-        # Check the last N days
         recent_days = all_days[-required_days:]
+
+       
+        from datetime import datetime as dt, timedelta
+        for i in range(1, len(recent_days)):
+            prev_date = dt.strptime(recent_days[i - 1], "%Y-%m-%d")
+            curr_date = dt.strptime(recent_days[i], "%Y-%m-%d")
+            diff = curr_date - prev_date
+            assert diff.days == 1, \
+                f"Readings are not consecutive: {recent_days[i-1]} and {recent_days[i]} have a gap"
 
         drought_days = 0
         for day in recent_days:
@@ -399,12 +397,12 @@ class ClimateShield(gl.Contract):
                     drought_days += 1
 
         if drought_days >= required_days:
-            # Trigger condition met — execute payouts
             self._execute_payouts(pool_id, recent_days, drought_days)
             return True
 
         return False
-
+    
+    
     # ─── Execute Payouts ──────────────────────────────────────
 
     def _execute_payouts(

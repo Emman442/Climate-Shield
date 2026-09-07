@@ -114,12 +114,12 @@ class ClimateShield {
         }
     }
 
-    async getWeatherReading(poolId: string): Promise<WeatherReading> {
+    async getWeatherReading(poolId: string, day: string): Promise<WeatherReading> {
         try {
             const weather_reading = await this.client.readContract({
                 address: this.contractAddress,
                 functionName: "get_weather_reading",
-                args:[poolId]
+                args:[poolId, day]
             });
 
             return weather_reading as WeatherReading;
@@ -320,6 +320,31 @@ class ClimateShield {
         }
     }
 
+    async CheckTrigger(
+        pool_id: string,
+    ) {
+        await this.client.connect("studionet");
+        try {
+            const txHash = await this.client.writeContract({
+                address: this.contractAddress,
+                functionName: "check_trigger",
+                args: [pool_id],
+                value: BigInt(0)
+            });
+
+            const receipt = await this.client.waitForTransactionReceipt({
+                hash: txHash,
+                status: TransactionStatus.ACCEPTED,
+            });
+
+            return receipt as TransactionReceipt;
+        } catch (error) {
+            console.error("Error checking trigger:", error);
+            throw new Error("Failed to check trigger");
+        }
+    }
+
+
     async TriggerEmergencyPayout(
         pool_id: string,
         reason: string
@@ -328,7 +353,7 @@ class ClimateShield {
         try {
             const txHash = await this.client.writeContract({
                 address: this.contractAddress,
-                functionName: "trigger_emergency_payout",
+                functionName: "admin_trigger_payout",
                 args: [pool_id, reason],
                 value: BigInt(0)
             });

@@ -42,6 +42,7 @@ export default function ExplorePoolsPage({ pools, isLoading, setCurrentTab, setS
   };
 
   const filters: FilterType[] = ['All', 'Open', 'Active', 'Triggered', 'Closed'];
+  const todayStr = new Date().toISOString().split('T')[0];
 
   return (
     <div className="bg-[#000000] text-white min-h-screen py-10">
@@ -119,7 +120,7 @@ export default function ExplorePoolsPage({ pools, isLoading, setCurrentTab, setS
               // Drought status coloring
               let indexColor = 'text-[#16a34a]';
               let indexDot = 'bg-[#16a34a]';
-              const {data: weatherReading} = useFetchWeatherReading(pool?.pool_id)
+              const {data: weatherReading} = useFetchWeatherReading(pool?.pool_id, todayStr)
               const {data: consecutiveDroughtDays} = useFetchConsecutiveDroughtDays(pool?.pool_id)
               if ( weatherReading?.drought_index === 'watch') {
                 indexColor = 'text-[#ca8a04]';
