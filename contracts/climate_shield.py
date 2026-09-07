@@ -32,9 +32,9 @@ class Policy:
 @allow_storage
 @dataclass
 class WeatherReading:
-    day: str                
-    soil_moisture: str     
-    drought_index: str  
+    day: str                # ISO date string e.g. "2026-07-09"
+    soil_moisture: str      # raw value as string e.g. "0.12"
+    drought_index: str      # "normal" | "watch" | "warning" | "severe"
     recorded_at: str
     recorded_by: str
 
@@ -73,6 +73,7 @@ class Pool:
     trigger_activated_at: str
     policy_ids: DynArray[str]
     reading_days: DynArray[str]  # ordered list of recorded day strings
+    season_end: i64
 
 
 class ClimateShield(gl.Contract):
@@ -143,7 +144,8 @@ class ClimateShield(gl.Contract):
         consecutive_days_required: i32,
         premium_per_policy: i32,
         coverage_per_policy: i32,
-        max_policies: i32
+        max_policies: i32,
+        season_end: i64
     ) -> str:
         self._only_admin()
 
@@ -180,7 +182,8 @@ class ClimateShield(gl.Contract):
             created_by=str(gl.message.sender_address),
             trigger_activated_at="",
             policy_ids=[],
-            reading_days=[]
+            reading_days=[],
+            season_end=season_end
         )
 
         self.pool_ids.append(pool_id)
@@ -259,17 +262,12 @@ class ClimateShield(gl.Contract):
 
     # ─── Record Daily Weather Reading ─────────────────────────
 
+
     @gl.public.write
     def record_daily_reading(self, pool_id: str, day: str) -> None:
-        """
-        Anyone can call this to record today's weather reading for a pool.
-        The contract fetches real soil moisture data from Open-Meteo API
-        for the pool's GPS coordinates and stores the drought index.
-        Call this once per day per pool to build the consecutive-day record.
-        """
         assert pool_id in self.pools, "Pool not found"
         p = self.pools[pool_id]
-        assert p.status in ["active"], "Pool not active"
+        assert p.status == "active", "Pool not active"
 
         reading_key = self._reading_key(pool_id, day)
         assert reading_key not in self.readings, "Reading already recorded for this day"
@@ -279,50 +277,35 @@ class ClimateShield(gl.Contract):
         threshold = p.drought_threshold
         recorder = str(gl.message.sender_address)
 
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        assert day <= today, "Cannot record readings for future dates"
+
         def fetch_weather() -> str:
-            # Open-Meteo API — free, no API key, returns JSON
-            # soil_moisture_0_to_1cm is volumetric soil water content (m³/m³)
+            # Only use captured variables here — no self.* reads
             url = (
                 f"https://api.open-meteo.com/v1/forecast"
                 f"?latitude={lat}"
                 f"&longitude={lon}"
                 f"&daily=soil_moisture_0_to_1cm"
+                f"&daily=time"
                 f"&timezone=auto"
                 f"&forecast_days=1"
             )
-
             try:
                 response = gl.nondet.web.get(url)
                 raw = response.body.decode("utf-8")
                 data = json.loads(raw)
 
-                # Extract today's soil moisture value
                 daily = data.get("daily", {})
                 moisture_list = daily.get("soil_moisture_0_to_1cm", [])
                 dates_list = daily.get("time", [])
 
                 if not moisture_list or moisture_list[0] is None:
-                    # Fallback to hourly if daily not available
-                    fallback_url = (
-                        f"https://api.open-meteo.com/v1/forecast"
-                        f"?latitude={lat}"
-                        f"&longitude={lon}"
-                        f"&hourly=soil_moisture_0_to_1cm"
-                        f"&timezone=auto"
-                        f"&forecast_days=1"
-                    )
-                    resp2 = gl.nondet.web.get(fallback_url)
-                    data2 = json.loads(resp2.body.decode("utf-8"))
-                    hourly = data2.get("hourly", {})
-                    hourly_moisture = hourly.get("soil_moisture_0_to_1cm", [])
-                    # Average the hourly readings for the day
-                    valid = [v for v in hourly_moisture if v is not None]
-                    if valid:
-                        moisture_val = sum(valid) / len(valid)
-                    else:
-                        moisture_val = float(threshold)
+                    moisture_val = float(threshold)
+                    weather_date = day
                 else:
                     moisture_val = float(moisture_list[0])
+                    weather_date = dates_list[0] if dates_list else day
 
                 threshold_val = float(threshold)
 
@@ -339,29 +322,37 @@ class ClimateShield(gl.Contract):
 
                 return json.dumps({
                     "moisture": str(round(moisture_val, 4)),
-                    "drought_index": drought_index
+                    "drought_index": drought_index,
+                    "weather_date": weather_date  # the date the API actually returned
                 }, separators=(',', ':'))
 
-            except Exception as e:
-                # If API fails, record as unresolvable for this day
+            except:
                 return json.dumps({
                     "moisture": threshold,
-                    "drought_index": "normal"
+                    "drought_index": "normal",
+                    "weather_date": day
                 }, separators=(',', ':'))
 
         raw_result = gl.eq_principle.prompt_non_comparative(
             fetch_weather,
-            task="Fetch today's soil moisture reading from Open-Meteo weather API and classify drought level",
-            criteria="Return JSON with moisture value and drought_index. drought_index must be one of: normal, watch, warning, severe. Be consistent with the actual API data."
+            task="Fetch soil moisture from Open-Meteo API and classify drought level",
+            criteria="Return JSON with moisture value, drought_index (normal/watch/warning/severe), and the weather_date the API returned."
         )
 
         try:
-            result_data = json.loads(raw_result.strip().strip('"').replace('\\"', '"'))
+            result_data = json.loads(
+                raw_result.strip().strip('"').replace('\\"', '"')
+            )
             moisture_val = result_data.get("moisture", threshold)
             drought_index = result_data.get("drought_index", "normal")
+            weather_date = result_data.get("weather_date", day)
         except:
             moisture_val = threshold
             drought_index = "normal"
+            weather_date = day
+
+        assert weather_date == day, \
+            f"API returned date {weather_date} does not match submitted day {day}"
 
         if drought_index not in ["normal", "watch", "warning", "severe"]:
             drought_index = "normal"
@@ -477,7 +468,29 @@ class ClimateShield(gl.Contract):
             max(0, vault - (per_farmer * len(eligible)))
         )
 
-    # ─── Manual Trigger (Admin Override) ─────────────────────
+    @gl.public.write
+    def expire_pool(self, pool_id: str) -> None:
+        """
+        Anyone can call this after the pool's season ends.
+        If not triggered, refunds remaining vault balance to admin.
+        """
+        assert pool_id in self.pools, "Pool not found"
+        p = self.pools[pool_id]
+        assert p.status == "active", "Pool not expirable"
+
+        now = int(datetime.now(timezone.utc).timestamp() * 1000)
+        assert now >= int(p.season_end), "Pool season not ended yet"
+
+        self.pools[pool_id].status = "expired"
+
+        # Refund remaining vault to admin if any surplus
+        remaining = int(p.vault_balance)
+        if remaining > 0:
+            self.pools[pool_id].vault_balance = i32(0)
+            _Recipient(Address(self.admin)).emit_transfer(
+                value=u256(remaining) * u256(10**18)
+            )
+
 
     @gl.public.write
     def admin_trigger_payout(
