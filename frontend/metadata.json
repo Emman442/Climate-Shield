@@ -1,0 +1,6 @@
+{
+  "name": "ClimateShield",
+  "description": "A decentralized parametric crop insurance platform for smallholder farmers, automatically distributing emergency funds based on satellite weather data.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
