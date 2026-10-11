@@ -106,13 +106,16 @@ def test_hours_from_another_day_are_ignored(direct_vm, direct_deploy, direct_own
 
 
 def test_trigger_pays_only_after_consecutive_verified_drought(direct_vm, direct_deploy, direct_owner, direct_alice):
-    direct_vm.warp("2024-06-03T00:00:00Z")
+    # Buy before the drought days
+    direct_vm.warp("2024-05-30T00:00:00Z")
     contract = deploy(direct_vm, direct_deploy, direct_owner)
     pool_id = create_pool(contract)
     direct_vm.sender = direct_alice
     policy_id = buy(contract, direct_vm, pool_id)
-    direct_vm.sender = direct_owner
 
+    # Move forward and record the streak
+    direct_vm.warp("2024-06-03T00:00:00Z")
+    direct_vm.sender = direct_owner
     mock_day(direct_vm, "2024-06-01", 0.05)
     contract.record_daily_reading(pool_id, "2024-06-01")
     with rejects("Not enough readings yet"):
@@ -139,14 +142,16 @@ def test_admin_cannot_pay_without_verified_readings(direct_vm, direct_deploy, di
         contract.admin_trigger_payout(pool_id, "Ground report says the field is dry")
 
 
+
 def test_admin_reason_is_kept_only_after_verified_readings(direct_vm, direct_deploy, direct_owner, direct_alice):
-    direct_vm.warp("2024-06-03T00:00:00Z")
+    direct_vm.warp("2024-05-30T00:00:00Z")
     contract = deploy(direct_vm, direct_deploy, direct_owner)
     pool_id = create_pool(contract)
     direct_vm.sender = direct_alice
     buy(contract, direct_vm, pool_id)
-    direct_vm.sender = direct_owner
 
+    direct_vm.warp("2024-06-03T00:00:00Z")
+    direct_vm.sender = direct_owner
     mock_day(direct_vm, "2024-06-01", 0.05)
     contract.record_daily_reading(pool_id, "2024-06-01")
     direct_vm.clear_mocks()
@@ -162,3 +167,137 @@ def test_admin_reason_is_kept_only_after_verified_readings(direct_vm, direct_dep
     reason = contract.get_payout("payout_1").trigger_reason
     assert "Ground report says the field is dry" in reason
     assert contract.get_pool(pool_id).admin_override_reason == "Ground report says the field is dry"
+
+def test_cannot_enroll_after_season_end(direct_vm, direct_deploy, direct_owner, direct_alice):
+    direct_vm.warp("2024-06-03T00:00:00Z")
+    contract = deploy(direct_vm, direct_deploy, direct_owner)
+    # season_end well in the past
+    pool_id = contract.create_pool(
+        "Sahel cover",
+        "Soil moisture cover for one season",
+        "Sahel",
+        "13.5",
+        "2.1",
+        "25",
+        THRESHOLD,
+        2,
+        2,
+        10,
+        20,
+        1700000000000,  # ~2023
+    )
+    direct_vm.sender = direct_alice
+    direct_vm.value = 2 * ONE_GEN
+    with rejects("Cannot enroll after season end"):
+        contract.buy_policy(pool_id)
+
+
+
+def test_reading_outside_season_is_rejected(direct_vm, direct_deploy, direct_owner, direct_alice):
+    # Season ends 2024-05-30. Buy before that, then try a reading after it.
+    direct_vm.warp("2024-05-20T00:00:00Z")
+    contract = deploy(direct_vm, direct_deploy, direct_owner)
+    pool_id = contract.create_pool(
+        "Sahel cover",
+        "Soil moisture cover for one season",
+        "Sahel",
+        "13.5",
+        "2.1",
+        "25",
+        THRESHOLD,
+        2,
+        2,
+        10,
+        20,
+        1717027200000,  # 2024-05-30 00:00 UTC
+    )
+    direct_vm.sender = direct_alice
+    buy(contract, direct_vm, pool_id)
+
+    direct_vm.warp("2024-06-03T00:00:00Z")
+    direct_vm.sender = direct_owner
+    mock_day(direct_vm, "2024-06-01", 0.05)
+    with rejects("Reading day is outside the pool season"):
+        contract.record_daily_reading(pool_id, "2024-06-01")
+
+def test_policy_bought_after_first_trigger_day_is_excluded(direct_vm, direct_deploy, direct_owner, direct_alice, direct_bob):
+    # Alice buys before the drought days
+    direct_vm.warp("2024-05-30T00:00:00Z")
+    contract = deploy(direct_vm, direct_deploy, direct_owner)
+    pool_id = create_pool(contract)
+    direct_vm.sender = direct_alice
+    alice_policy = buy(contract, direct_vm, pool_id)
+
+    # Record the streak
+    direct_vm.warp("2024-06-03T00:00:00Z")
+    direct_vm.sender = direct_owner
+    mock_day(direct_vm, "2024-06-01", 0.05)
+    contract.record_daily_reading(pool_id, "2024-06-01")
+    direct_vm.clear_mocks()
+    mock_day(direct_vm, "2024-06-02", 0.05)
+    contract.record_daily_reading(pool_id, "2024-06-02")
+
+    # Bob buys on the second drought day
+    direct_vm.warp("2024-06-02T12:00:00Z")
+    direct_vm.sender = direct_bob
+    bob_policy = buy(contract, direct_vm, pool_id)
+
+    direct_vm.sender = direct_owner
+    assert contract.check_trigger(pool_id) is True
+
+    assert contract.get_policy(alice_policy).claimed is True
+    assert contract.get_policy(bob_policy).claimed is False
+    assert contract.get_pool(pool_id).status == "triggered"
+
+
+def test_cancel_after_expiry_is_rejected(direct_vm, direct_deploy, direct_owner, direct_alice):
+    # Season ends 2024-06-10 so we can expire it
+    direct_vm.warp("2024-05-30T00:00:00Z")
+    contract = deploy(direct_vm, direct_deploy, direct_owner)
+    pool_id = contract.create_pool(
+        "Sahel cover",
+        "Soil moisture cover for one season",
+        "Sahel",
+        "13.5",
+        "2.1",
+        "25",
+        THRESHOLD,
+        2,
+        2,
+        10,
+        20,
+        1717977600000,  # 2024-06-10 00:00 UTC
+    )
+    direct_vm.sender = direct_alice
+    policy_id = buy(contract, direct_vm, pool_id)
+
+    # Move past season end and expire
+    direct_vm.warp("2024-06-15T00:00:00Z")
+    direct_vm.sender = direct_owner
+    contract.expire_pool(pool_id)
+    assert contract.get_pool(pool_id).status == "expired"
+    vault_after_expire = contract.get_pool(pool_id).vault_balance
+
+    direct_vm.sender = direct_alice
+    with rejects("Cannot cancel after expiry"):
+        contract.cancel_policy(policy_id)
+
+    assert contract.get_pool(pool_id).vault_balance == vault_after_expire
+
+def test_admin_trigger_still_requires_verified_readings(direct_vm, direct_deploy, direct_owner, direct_alice):
+    direct_vm.warp("2024-06-03T00:00:00Z")
+    contract = deploy(direct_vm, direct_deploy, direct_owner)
+    pool_id = create_pool(contract)
+    direct_vm.sender = direct_alice
+    buy(contract, direct_vm, pool_id)
+    direct_vm.sender = direct_owner
+
+    # No readings at all
+    with rejects("Not enough readings yet"):
+        contract.admin_trigger_payout(pool_id, "Source is down, paying from ground report only")
+
+    # One reading is still not enough for a 2-day requirement
+    mock_day(direct_vm, "2024-06-01", 0.05)
+    contract.record_daily_reading(pool_id, "2024-06-01")
+    with rejects("Not enough readings yet"):
+        contract.admin_trigger_payout(pool_id, "Source is down, paying from ground report only")

@@ -117,6 +117,13 @@ class ClimateShield(gl.Contract):
     def _tx_day(self) -> str:
         return str(gl.message_raw["datetime"])[:10]
 
+    def _season_end_day(self, season_end: i64) -> str:
+        """Convert season_end (unix ms if > 10000, else YYYYMMDD-style) to YYYY-MM-DD."""
+        if int(season_end) > 10000:
+            from datetime import datetime as dt, timezone as tz
+            return dt.fromtimestamp(int(season_end) / 1000, tz=tz.utc).strftime("%Y-%m-%d")
+        return str(season_end)
+
     def _verified_trigger_days(self, pool_id: str) -> list[str]:
         p = self.pools[pool_id]
         required = int(p.consecutive_days_required)
@@ -128,7 +135,9 @@ class ClimateShield(gl.Contract):
             prev_date = dt.strptime(recent[i - 1], "%Y-%m-%d")
             curr_date = dt.strptime(recent[i], "%Y-%m-%d")
             assert (curr_date - prev_date).days == 1, "Readings are not consecutive"
+        season_end_day = self._season_end_day(p.season_end)
         for day in recent:
+            assert day <= season_end_day, "Trigger day is outside the pool season"
             reading = self.readings[self._reading_key(pool_id, day)]
             assert reading.drought_index in ("warning", "severe"), "Verified readings do not meet the drought rule"
         return recent
@@ -203,6 +212,8 @@ class ClimateShield(gl.Contract):
         assert pool_id in self.pools, "Pool not found"
         p = self.pools[pool_id]
         assert p.status in ["open", "active"], "Pool not accepting new policies"
+        season_end_day = self._season_end_day(p.season_end)
+        assert self._tx_day() < season_end_day, "Cannot enroll after season end"
         assert int(p.total_policies) < int(p.max_policies), "Pool is full"
         farmer_key = self._farmer_pool_key(pool_id, farmer)
         assert farmer_key not in self.farmer_pool_policy, "Already have a policy in this pool"
@@ -245,6 +256,8 @@ class ClimateShield(gl.Contract):
         reading_key = self._reading_key(pool_id, day)
         assert reading_key not in self.readings, "Reading already recorded for this day"
         assert day <= self._tx_day(), "Cannot record readings for future dates"
+        season_end_day = self._season_end_day(p.season_end)
+        assert day <= season_end_day, "Reading day is outside the pool season"
 
         lat = p.latitude
         lon = p.longitude
@@ -294,12 +307,17 @@ class ClimateShield(gl.Contract):
         p = self.pools[pool_id]
         coverage = int(p.coverage_per_policy)
         vault = int(p.vault_balance)
+        first_trigger_day = trigger_days[0] if trigger_days else ""
         eligible = []
         for pid in list(p.policy_ids):
             policy = self.policies[pid]
-            if policy.active and not policy.claimed:
-                eligible.append(pid)
-        assert len(eligible) > 0, "No eligible policies"
+            if not (policy.active and not policy.claimed):
+                continue
+            joined_day = str(policy.joined_at)[:10]
+            if first_trigger_day and joined_day >= first_trigger_day:
+                continue
+            eligible.append(pid)
+        assert len(eligible) > 0, "No eligible policies that predate the trigger days"
         per_farmer = vault // len(eligible) if coverage * len(eligible) > vault else coverage
         trigger_reason = (
             f"Drought trigger: {drought_days} consecutive verified warning/severe days. "
@@ -334,10 +352,8 @@ class ClimateShield(gl.Contract):
         p = self.pools[pool_id]
         assert p.status == "active", "Pool not expirable"
         day = self._tx_day()
-        if int(p.season_end) > 10000:
-            from datetime import datetime as dt, timezone as tz
-            end = dt.fromtimestamp(int(p.season_end) / 1000, tz=tz.utc).strftime("%Y-%m-%d")
-            assert day >= end, "Pool season not ended yet"
+        season_end_day = self._season_end_day(p.season_end)
+        assert day >= season_end_day, "Pool season not ended yet"
         self.pools[pool_id].status = "expired"
         remaining = int(p.vault_balance)
         if remaining > 0:
@@ -346,13 +362,15 @@ class ClimateShield(gl.Contract):
 
     @gl.public.write
     def admin_trigger_payout(self, pool_id: str, reason: str) -> None:
+        """Admin may attach a note, but still requires the same verified Open-Meteo streak.
+        This is not a source-outage or manual-override path."""
         self._only_admin()
         assert pool_id in self.pools, "Pool not found"
         assert self.pools[pool_id].status == "active", "Pool not active"
         assert len(reason.strip()) >= 20, "Reason must be at least 20 characters"
         recent = self._verified_trigger_days(pool_id)
         self.pools[pool_id].admin_override_reason = reason.strip()
-        self.pools[pool_id].admin_override_evidence = "verified-open-meteo-readings"
+        self.pools[pool_id].admin_override_evidence = "requires-verified-open-meteo-readings"
         self.pools[pool_id].admin_override_at = gl.message_raw["datetime"]
         self._execute_payouts(pool_id, recent, len(recent), reason.strip())
 
@@ -364,7 +382,9 @@ class ClimateShield(gl.Contract):
         assert policy.farmer == farmer, "Not your policy"
         assert policy.active and not policy.claimed, "Policy is not cancellable"
         pool_id = policy.pool_id
-        assert self.pools[pool_id].status != "triggered", "Cannot cancel after trigger"
+        pool_status = self.pools[pool_id].status
+        assert pool_status != "triggered", "Cannot cancel after trigger"
+        assert pool_status != "expired", "Cannot cancel after expiry"
         refund = int(policy.premium_paid) // 2
         self.policies[policy_id].active = False
         self.pools[pool_id].total_policies -= i32(1)
